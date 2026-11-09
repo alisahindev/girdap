@@ -89,6 +89,30 @@
     color: var(--dim);
     font-variant-numeric: tabular-nums;
   }
+  .tools {
+    position: fixed; z-index: 2;
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    right: max(12px, env(safe-area-inset-right, 0px));
+    display: flex; gap: 4px;
+  }
+  .tools button {
+    width: 44px; height: 44px; padding: 0;
+    display: grid; place-items: center;
+    border: 0; border-radius: 50%;
+    background: transparent; color: var(--fg);
+    opacity: 0.75; cursor: pointer;
+  }
+  .tools button:hover { opacity: 1; }
+  .cta {
+    pointer-events: auto;
+    display: block; margin: 0 auto 1.1rem;
+    min-height: 48px; padding: 0.8rem 1.6rem;
+    font: 500 0.95rem var(--font-mono);
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--bg); background: var(--fg);
+    border: 0; border-radius: 999px; cursor: pointer;
+  }
+  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { .hint { animation: none; } }
 </style>
@@ -102,7 +126,24 @@
   <p class="sub" id="sub">Hiç durmuyorsun. Dokununca yön değiştirirsin. Halka sana ulaşmadan yörüngendeki parlak yayın içine gir.</p>
 </div>
 
+<div class="tools">
+  <button type="button" id="mute" aria-label="Ses" aria-pressed="false">
+    <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+      <path id="snd-on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path id="snd-off" hidden d="M16.5 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+  <button type="button" id="pause" aria-label="Duraklat" hidden>
+    <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/>
+      <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/>
+    </svg>
+  </button>
+</div>
+
 <div class="layer bottom">
+  <button type="button" class="cta" id="cont" hidden>Devam et</button>
   <div class="hint" id="hint">Başlamak için dokun</div>
   <div class="label" id="best" hidden></div>
 </div>
@@ -114,7 +155,8 @@
   const buf = document.createElement('canvas');
   const bctx = buf.getContext('2d');
   const el = id => document.getElementById(id);
-  const ui = { title: el('title'), score: el('score'), zone: el('zone'), sub: el('sub'), hint: el('hint'), best: el('best') };
+  const ui = { title: el('title'), score: el('score'), zone: el('zone'), sub: el('sub'), hint: el('hint'), best: el('best'),
+    cont: el('cont'), mute: el('mute'), pause: el('pause'), sndOn: el('snd-on'), sndOff: el('snd-off') };
   const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const TAU = Math.PI * 2;
 
@@ -155,7 +197,19 @@
   resize();
 
   // ---- ses ----
-  let ac = null;
+  let ac = null, muted = false;
+  try { muted = localStorage.getItem('girdap.muted') === '1'; } catch (e) {}
+  function showMute() {
+    ui.mute.setAttribute('aria-pressed', String(muted));
+    ui.sndOn.toggleAttribute('hidden', muted);
+    ui.sndOff.toggleAttribute('hidden', !muted);
+  }
+  showMute();
+  ui.mute.addEventListener('click', () => {
+    muted = !muted; showMute(); ui.mute.blur();
+    try { localStorage.setItem('girdap.muted', muted ? '1' : '0'); } catch (e) {}
+    if (!muted) { wake(); tone(440, 0.08, 'triangle', 0.08); }
+  });
   function wake() {
     try {
       if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -163,7 +217,7 @@
     } catch (e) { ac = null; }
   }
   function tone(freq, dur, type, vol, slideTo) {
-    if (!ac) return;
+    if (!ac || muted) return;
     const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
     o.type = type; o.frequency.setValueAtTime(freq, t);
     if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
@@ -178,7 +232,7 @@
   // ---- durum ----
   let state = 'menu';
   let rings = [], score = 0, best = 0, t = 0, spawnIn = 0.4, lastGap = 0, deadT = 0;
-  let flash = 0, kick = 0, ringCount = 0;
+  let flash = 0, kick = 0, ringCount = 0, usedContinue = false;
   const player = { a: -Math.PI / 2, dir: 1 };
   try { best = parseInt(localStorage.getItem('girdap.best') || '0', 10) || 0; } catch (e) {}
 
@@ -222,16 +276,42 @@
     state = 'play'; rings = []; score = 0; spawnIn = 0.5; kick = 0; burstLeft = 0;
     setZone(0);
     player.a = -Math.PI / 2; player.dir = 1; lastGap = player.a;
+    usedContinue = false;
     ui.title.hidden = true; ui.sub.hidden = true; ui.hint.hidden = true; ui.best.hidden = true;
+    ui.cont.hidden = true; ui.pause.hidden = false;
     ui.score.hidden = false; ui.zone.hidden = false; ui.score.textContent = '0';
     tone(note(5), 0.18, 'triangle', 0.12);
   }
+  // Her elde bir kez kaldığın yerden devam edebilirsin (skor 5 ve üstünde).
+  // Portal reklamı bağlanınca "ödüllü reklam bitti" sinyali buradan revive() çağıracak.
+  function revive() {
+    state = 'play'; usedContinue = true;
+    rings = []; burstLeft = 0; spawnIn = 0.9; kick = 0; flash = 0.25;
+    lastGap = player.a;
+    ui.hint.hidden = true; ui.best.hidden = true; ui.cont.hidden = true; ui.pause.hidden = false;
+    tone(note(score), 0.2, 'triangle', 0.12);
+  }
+  ui.cont.addEventListener('click', () => {
+    ui.cont.blur(); wake();
+    if (state === 'dead' && deadT > 0.45 && !usedContinue) revive();
+  });
+  function setPaused(on) {
+    if (on && state === 'play') {
+      state = 'paused';
+      ui.hint.textContent = 'Duraklatıldı · devam için dokun'; ui.hint.hidden = false;
+    } else if (!on && state === 'paused') {
+      state = 'play'; ui.hint.hidden = true;
+    }
+  }
+  ui.pause.addEventListener('click', () => { ui.pause.blur(); setPaused(state === 'play'); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) setPaused(true); });
   function die() {
     state = 'dead'; deadT = 0; flash = 1;
     if (score > best) { best = score; try { localStorage.setItem('girdap.best', String(best)); } catch (e) {} }
     ui.hint.textContent = 'Tekrar için dokun';
     ui.best.textContent = 'En iyi ' + best;
     ui.hint.hidden = false; ui.best.hidden = false;
+    ui.pause.hidden = true; ui.cont.hidden = usedContinue || score < 5;
     tone(320, 0.6, 'sawtooth', 0.14, 40);
     try { navigator.vibrate && navigator.vibrate(60); } catch (e) {}
   }
@@ -249,9 +329,13 @@
     wake();
     if (state === 'menu') startGame();
     else if (state === 'play') { player.dir *= -1; tone(140, 0.05, 'square', 0.04); }
+    else if (state === 'paused') setPaused(false);
     else if (state === 'dead' && deadT > 0.45) startGame();
   }
-  addEventListener('pointerdown', e => { e.preventDefault(); act(); }, { passive: false });
+  addEventListener('pointerdown', e => {
+    if (e.target.closest && e.target.closest('button')) return;   // düğmeler kendi işini yapar
+    e.preventDefault(); act();
+  }, { passive: false });
   const local = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
   let auto = false;   // yalnızca yerel denemede: A tuşu oyunu kendi kendine oynatır
   let lock = false;   // yalnızca yerel denemede: L tuşu bölgeyi sabitler
@@ -262,6 +346,8 @@
     if (local && e.code === 'KeyA') { auto = !auto; return; }
     if (local && e.code === 'KeyL') { lock = !lock; return; }
     if (local && e.code === 'KeyF') { turbo = turbo ? 0 : 45; return; }
+    if (e.code === 'KeyP' || e.code === 'Escape') { if (state === 'play' || state === 'paused') setPaused(state === 'play'); return; }
+    if (e.code === 'KeyM') { ui.mute.click(); return; }
     if (e.code === 'Space' || e.code === 'Enter' || e.code.startsWith('Arrow')) { e.preventDefault(); act(); }
   });
 
@@ -402,6 +488,7 @@
   let last = performance.now(), acc = 0;
   function frame(now) {
     acc += Math.min(0.1, (now - last) / 1000); last = now;
+    if (state === 'paused') { acc = 0; requestAnimationFrame(frame); return; }
     let n = 0;
     if (turbo) { for (let i = 0; i < turbo; i++) step(); acc = 0; }
     while (acc >= DT && n < 2) { step(); acc -= DT; n++; }
