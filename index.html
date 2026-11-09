@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="description" content="Tek dokunuşla oynanan refleks oyunu. Hiç durmuyorsun, dokununca yön değiştirirsin.">
+<meta property="og:title" content="Girdap">
+<meta property="og:description" content="Tek dokunuşla oynanan refleks oyunu.">
+<meta name="theme-color" content="#05030a">
+<style>body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Girdap</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;800&family=DM+Mono:wght@400;500&display=swap">
+<style>
+  /* Yerleşim: tam ekran tek tuval. Yazılar tuvalin üstünde, ekranın üst ve alt
+     üçte birinde durur; orta, girdabın doğduğu yer olduğu için boş kalır.
+     Renkler oyun içinde bölgeye göre değişir; buradakiler ilk bölgenin değerleri. */
+  :root {
+    --bg: #05030a;
+    --fg: #f6f1ff;
+    --dim: #a79cc6;
+    --font-display: 'Unbounded', 'Arial Black', system-ui, sans-serif;
+    --font-mono: 'DM Mono', ui-monospace, 'Cascadia Mono', Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+    transition: color 0.4s, background-color 0.4s;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .layer {
+    position: fixed; left: 0; right: 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    text-align: center;
+    pointer-events: none;
+    text-shadow: 0 0 18px var(--bg), 0 0 6px var(--bg);
+  }
+  .top { top: 0; padding-top: calc(env(safe-area-inset-top, 0px) + 6vh); }
+  .bottom { bottom: 0; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8vh); }
+
+  .title {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: clamp(2.4rem, 11vw, 5.5rem);
+    letter-spacing: 0.04em;
+    line-height: 1;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .score {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: clamp(2.6rem, 12vw, 6rem);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .sub {
+    margin: 0.9rem auto 0;
+    max-width: 30ch;
+    font-size: clamp(0.9rem, 3.4vw, 1.05rem);
+    color: var(--dim);
+    line-height: 1.5;
+  }
+  .hint {
+    display: inline-block;
+    font-size: clamp(0.8rem, 3.2vw, 0.95rem);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .label {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .hint { animation: none; } }
+</style>
+
+<canvas id="c" aria-label="Girdap oyun alanı"></canvas>
+
+<div class="layer top">
+  <h1 class="title" id="title">GİRDAP</h1>
+  <div class="score" id="score" hidden>0</div>
+  <div class="label" id="zone" hidden></div>
+  <p class="sub" id="sub">Hiç durmuyorsun. Dokununca yön değiştirirsin. Halka sana ulaşmadan yörüngendeki parlak yayın içine gir.</p>
+</div>
+
+<div class="layer bottom">
+  <div class="hint" id="hint">Başlamak için dokun</div>
+  <div class="label" id="best" hidden></div>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const buf = document.createElement('canvas');
+  const bctx = buf.getContext('2d');
+  const el = id => document.getElementById(id);
+  const ui = { title: el('title'), score: el('score'), zone: el('zone'), sub: el('sub'), hint: el('hint'), best: el('best') };
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const TAU = Math.PI * 2;
+
+  // ---- bölgeler: her 8 skorda dünya değişir ----
+  // fade: izlerin ömrü · rot: sarmalın bükülmesi · ratio: izlerin halkaya göre hızı
+  // lw: halka kalınlığı · sides: merkezden yayılan desenin köşe sayısı
+  const ZONE_LEN = 8;
+  const ZONES = [
+    { name: 'Neon',    bg: '#05030a', fg: '#f6f1ff', dim: '#a79cc6', hues: [322, 188], lum: 58, edge: '#ffffff', ink: '#ffffff', add: true,  fade: 0.930, rot: 0.011,  ratio: 0.55, lw: 0.10, sides: 3 },
+    { name: 'Lav',     bg: '#0d0402', fg: '#fff3e6', dim: '#c9a58c', hues: [12, 44],   lum: 54, edge: '#fff2c2', ink: '#ffffff', add: true,  fade: 0.957, rot: 0.021,  ratio: 0.48, lw: 0.16, sides: 4 },
+    { name: 'Asit',    bg: '#020a06', fg: '#efffe9', dim: '#8fb89a', hues: [84, 158],  lum: 56, edge: '#ffffff', ink: '#ffffff', add: true,  fade: 0.942, rot: -0.017, ratio: 0.62, lw: 0.035, sides: 6, double: true },
+    { name: 'Buz',     bg: '#02050f', fg: '#eaf3ff', dim: '#8ea3c9', hues: [204, 264], lum: 66, edge: '#ffffff', ink: '#ffffff', add: true,  fade: 0.968, rot: 0.030,  ratio: 0.34, lw: 0.12, sides: 5 },
+    { name: 'Negatif', bg: '#f1ede2', fg: '#16121f', dim: '#5d566e', hues: [252, 352], lum: 34, edge: '#16121f', ink: '#16121f', add: false, fade: 0.940, rot: 0.013,  ratio: 0.55, lw: 0.10, sides: 3 },
+  ];
+  let zoneIdx = 0, Z = ZONES[0];
+  function setZone(i) {
+    zoneIdx = i; Z = ZONES[i % ZONES.length];
+    const s = document.documentElement.style;
+    s.setProperty('--bg', Z.bg); s.setProperty('--fg', Z.fg); s.setProperty('--dim', Z.dim);
+    s.setProperty('color-scheme', Z.add ? 'dark' : 'light');
+    ui.zone.textContent = Z.name;
+  }
+
+  let W = 0, H = 0, cx = 0, cy = 0, R = 0, unit = 0;
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    let w = innerWidth * dpr, h = innerHeight * dpr;
+    const m = Math.max(w, h);
+    if (m > 1200) { w *= 1200 / m; h *= 1200 / m; }
+    W = cv.width = buf.width = Math.max(2, Math.round(w));
+    H = cv.height = buf.height = Math.max(2, Math.round(h));
+    cx = W / 2; cy = H / 2;
+    unit = Math.min(W, H);
+    R = unit * 0.33;
+    ctx.fillStyle = Z.bg; ctx.fillRect(0, 0, W, H);
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // ---- ses ----
+  let ac = null;
+  function wake() {
+    try {
+      if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+      else if (ac.state === 'suspended') ac.resume();
+    } catch (e) { ac = null; }
+  }
+  function tone(freq, dur, type, vol, slideTo) {
+    if (!ac) return;
+    const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+  const SCALE = [0, 3, 5, 7, 10];
+  const note = n => 220 * Math.pow(2, (SCALE[n % 5] + 12 * (Math.floor(n / 5) % 3)) / 12);
+
+  // ---- durum ----
+  let state = 'menu';
+  let rings = [], score = 0, best = 0, t = 0, spawnIn = 0.4, lastGap = 0, deadT = 0;
+  let flash = 0, kick = 0, ringCount = 0;
+  const player = { a: -Math.PI / 2, dir: 1 };
+  try { best = parseInt(localStorage.getItem('girdap.best') || '0', 10) || 0; } catch (e) {}
+
+  const START = 0.06;                                              // halkanın doğduğu yarıçap (yörüngeye oranla)
+  const travel = () => Math.max(1.1, 2.3 - score * 0.02);          // halkanın sana ulaşma süresi
+  const interval = () => Math.max(0.55, 1.15 - score * 0.012);
+  const gapWidth = () => Math.max(1.1, 2.3 - score * 0.025);
+  const omega = () => 2.3 + Math.min(1.0, score * 0.02);
+
+  // Halka çeşitleri: düz · dönen (5+) · çift boşluklu (12+) · peş peşe ikili (20+)
+  const BURST_GAP = 0.34;
+  let burstLeft = 0;
+  function spawn() {
+    let n = 1, spin = 0;
+    let reach = omega() * interval() * 0.6;
+    if (burstLeft > 0) { burstLeft--; reach = omega() * BURST_GAP * 0.5; }
+    else if (state === 'play') {
+      const x = Math.random();
+      if (score >= 20 && x < 0.12) burstLeft = 1;
+      else if (score >= 12 && x >= 0.12 && x < 0.28) n = 2;
+      else if (score >= 5 && x >= 0.28 && x < 0.50) spin = (Math.random() < 0.5 ? -1 : 1) * (0.5 + Math.random() * 0.4);
+    }
+    lastGap += (Math.random() * 2 - 1) * reach;      // halkanın sana ulaştığı andaki boşluk
+    const h = Z.hues[ringCount++ % 2];
+    rings.push({
+      rn: START, gap: lastGap - spin * travel(), spin, n,
+      w: gapWidth() * (n === 2 ? 0.72 : 1), glow: 0,
+      color: `hsl(${h} 100% ${Z.lum}%)`,
+      mark: Z.add ? `hsl(${h} 100% 78%)` : Z.ink,
+    });
+  }
+  // a açısının, halkanın en yakın boşluğunun ortasına işaretli uzaklığı
+  function gapDist(a, r) {
+    const seg = TAU / r.n;
+    let d = ((a - r.gap) % seg + seg) % seg;
+    if (d > seg / 2) d -= seg;
+    return d;
+  }
+
+  function startGame() {
+    state = 'play'; rings = []; score = 0; spawnIn = 0.5; kick = 0; burstLeft = 0;
+    setZone(0);
+    player.a = -Math.PI / 2; player.dir = 1; lastGap = player.a;
+    ui.title.hidden = true; ui.sub.hidden = true; ui.hint.hidden = true; ui.best.hidden = true;
+    ui.score.hidden = false; ui.zone.hidden = false; ui.score.textContent = '0';
+    tone(note(5), 0.18, 'triangle', 0.12);
+  }
+  function die() {
+    state = 'dead'; deadT = 0; flash = 1;
+    if (score > best) { best = score; try { localStorage.setItem('girdap.best', String(best)); } catch (e) {} }
+    ui.hint.textContent = 'Tekrar için dokun';
+    ui.best.textContent = 'En iyi ' + best;
+    ui.hint.hidden = false; ui.best.hidden = false;
+    tone(320, 0.6, 'sawtooth', 0.14, 40);
+    try { navigator.vibrate && navigator.vibrate(60); } catch (e) {}
+  }
+  function pass(r) {
+    score++; ui.score.textContent = score;
+    r.glow = 1; kick = 0.03;
+    tone(note(score), 0.14, 'triangle', 0.1);
+    const zi = Math.floor(score / ZONE_LEN);
+    if (zi !== zoneIdx && !lock) {
+      setZone(zi); flash = 0.5; kick = 0.07;
+      tone(note(score) / 2, 0.5, 'sine', 0.16); tone(note(score + 2), 0.5, 'triangle', 0.08);
+    }
+  }
+  function act() {
+    wake();
+    if (state === 'menu') startGame();
+    else if (state === 'play') { player.dir *= -1; tone(140, 0.05, 'square', 0.04); }
+    else if (state === 'dead' && deadT > 0.45) startGame();
+  }
+  addEventListener('pointerdown', e => { e.preventDefault(); act(); }, { passive: false });
+  const local = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  let auto = false;   // yalnızca yerel denemede: A tuşu oyunu kendi kendine oynatır
+  let lock = false;   // yalnızca yerel denemede: L tuşu bölgeyi sabitler
+  let turbo = 0;      // yalnızca yerel denemede: F tuşu her karede çok adım atar
+  addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if (local && /^Digit[1-5]$/.test(e.code)) { score = (e.code.slice(5) - 1) * ZONE_LEN; setZone(score / ZONE_LEN); return; }
+    if (local && e.code === 'KeyA') { auto = !auto; return; }
+    if (local && e.code === 'KeyL') { lock = !lock; return; }
+    if (local && e.code === 'KeyF') { turbo = turbo ? 0 : 45; return; }
+    if (e.code === 'Space' || e.code === 'Enter' || e.code.startsWith('Arrow')) { e.preventDefault(); act(); }
+  });
+
+  function ringPath(rad, r) {
+    const seg = TAU / r.n;
+    ctx.beginPath();
+    for (let i = 0; i < r.n; i++) {
+      const a0 = r.gap + i * seg + r.w / 2;
+      ctx.moveTo(cx + Math.cos(a0) * rad, cy + Math.sin(a0) * rad);
+      ctx.arc(cx, cy, rad, a0, r.gap + (i + 1) * seg - r.w / 2);
+    }
+    ctx.stroke();
+  }
+
+  // ---- adım: simülasyon + geri besleme çizimi ----
+  const DT = 1 / 60;
+  function step() {
+    t += DT;
+    const k = Math.log(1 / START) / travel();   // START -> 1.0 büyüme hızı
+    let zoom = Math.exp(k * DT * Z.ratio) * (1 + kick);
+    let rot = calm ? 0 : Z.rot * player.dir;
+    let fade = Z.fade;
+    kick *= 0.82;
+
+    if (state === 'dead') {
+      deadT += DT;
+      zoom = 1.045; rot = calm ? 0 : 0.07 * player.dir; fade = 0.975;
+    } else {
+      spawnIn -= DT;
+      if (spawnIn <= 0) { spawn(); spawnIn = burstLeft > 0 ? BURST_GAP : interval(); }
+      const grow = Math.exp(k * DT);
+      if (auto && state === 'play') {
+        let nx = null;
+        for (const r of rings) if (r.rn < 1 && (!nx || r.rn > nx.rn)) nx = r;
+        if (nx) {
+          const d = -gapDist(player.a, nx);
+          if (Math.abs(d) > nx.w * 0.25) player.dir = d > 0 ? 1 : -1;
+        }
+      }
+      if (state === 'play') player.a += player.dir * omega() * DT;
+      const edge = Math.hypot(W, H) / 2 / R + 0.5;
+      for (let i = rings.length - 1; i >= 0; i--) {
+        const r = rings[i], before = r.rn;
+        r.rn *= grow; r.glow *= 0.9; r.gap += r.spin * DT;
+        if (state === 'play' && before < 1 && r.rn >= 1) {
+          if (Math.abs(gapDist(player.a, r)) > r.w / 2 + 0.12) { die(); break; }
+          pass(r);
+        }
+        if (r.rn > edge) rings.splice(i, 1);
+      }
+    }
+
+    // önceki kareyi büyütüp döndürerek geri çiz: bütün görüntü bu izlerden oluşur
+    bctx.globalCompositeOperation = 'copy';
+    bctx.drawImage(cv, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = Z.bg; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = fade;
+    ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(zoom, zoom);
+    ctx.drawImage(buf, -cx, -cy);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+
+    if (flash > 0.02) {
+      ctx.globalAlpha = flash * 0.7; ctx.fillStyle = Z.ink; ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1; flash *= 0.8;
+    }
+    if (state === 'dead') return;
+
+    // merkezdeki kaynak: dönen çokgen ve üç nokta; izleri sarmal bir tünele dönüşür
+    ctx.globalCompositeOperation = Z.add ? 'lighter' : 'source-over';
+    const spin = t * 1.6 * (Z.rot < 0 ? -1 : 1);
+    ctx.lineWidth = Math.max(1, unit * 0.003);
+    ctx.strokeStyle = `hsl(${Z.hues[1]} 100% ${Z.lum}%)`;
+    ctx.beginPath();
+    for (let i = 0; i <= Z.sides; i++) {
+      const a = spin + i * TAU / Z.sides, d = unit * 0.034;
+      ctx[i ? 'lineTo' : 'moveTo'](cx + Math.cos(a) * d, cy + Math.sin(a) * d);
+    }
+    ctx.stroke();
+    for (let i = 0; i < 3; i++) {
+      const a = -spin * 1.4 + i * TAU / 3, d = unit * 0.018;
+      ctx.fillStyle = `hsl(${Z.hues[i % 2]} 100% ${Z.lum}%)`;
+      ctx.beginPath(); ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, unit * 0.006, 0, TAU); ctx.fill();
+    }
+
+    // halkalar
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.lineCap = 'butt';
+    for (const r of rings) {
+      const rad = r.rn * R;
+      ctx.strokeStyle = r.color;
+      ctx.lineWidth = Math.max(1.5, rad * Z.lw);
+      ringPath(rad, r);
+      if (Z.double) ringPath(rad * 0.9, r);
+      ctx.lineWidth = Math.max(1, rad * 0.016);
+      ctx.strokeStyle = Z.edge;
+      ringPath(rad * (1 + Z.lw / 2), r);
+      if (r.glow > 0.03) {               // geçtiğin halka bir an parlar
+        ctx.globalAlpha = r.glow; ctx.strokeStyle = Z.ink;
+        ctx.lineWidth = Math.max(1.5, rad * Z.lw);
+        ringPath(rad, r);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    if (state !== 'play') return;
+
+    // hedef: sıradaki halkanın boşluğu, senin yörüngende işaretlenir
+    let next = null;
+    for (const r of rings) if (r.rn < 1 && (!next || r.rn > next.rn)) next = r;
+    if (next) {
+      ctx.globalAlpha = 0.35 + 0.65 * next.rn;
+      ctx.lineCap = 'round';
+      ctx.lineWidth = Math.max(2, unit * 0.007);
+      ctx.strokeStyle = next.mark;
+      ctx.beginPath();
+      for (let i = 0; i < next.n; i++) {
+        const a = next.gap + i * TAU / next.n;
+        ctx.moveTo(cx + Math.cos(a - next.w / 2) * R, cy + Math.sin(a - next.w / 2) * R);
+        ctx.arc(cx, cy, R, a - next.w / 2, a + next.w / 2);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // oyuncu
+    const px = cx + Math.cos(player.a) * R, py = cy + Math.sin(player.a) * R;
+    ctx.fillStyle = Z.ink;
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath(); ctx.arc(px, py, unit * 0.034, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(px, py, unit * 0.017, 0, TAU); ctx.fill();
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    acc += Math.min(0.1, (now - last) / 1000); last = now;
+    let n = 0;
+    if (turbo) { for (let i = 0; i < turbo; i++) step(); acc = 0; }
+    while (acc >= DT && n < 2) { step(); acc -= DT; n++; }
+    if (n === 2) acc = 0;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
