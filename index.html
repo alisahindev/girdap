@@ -213,27 +213,25 @@
   });
 
   // Ses tasarımı: hepsi tarayıcıda üretilir, dosya yok.
-  // Tempoya bağlı küçük bir müzik motoru çalar: pad, arpej, bas, davul. Skor arttıkça katmanlar girer.
-  // Her geçişte o anki akordan bir FM çan notası çalar; ne zaman geçersen geç müziğe uyar.
+  // Kural: çalan her şey bölgenin tek bir tonundan ve beş sesli dizisinden gelir, o yüzden hiçbir ses
+  // diğeriyle çakışmaz. Kendi başına akan bir ritim yok; müziği oyuncunun geçişleri çalar.
+  //   zemin: bölgenin akorunu tutan pad (kök, beşli, oktav, üçlü)
+  //   geçiş: dizide adım adım ilerleyen çan melodisi; skor arttıkça bas, vuruş ve ikinci ses eklenir
   const VOL = 0.85;
-  // bölge sırasıyla: kök (La'dan yarım ses) ve iki akor (köke göre yarım sesler); akor iki ölçüde bir değişir
-  const MUSIC = [
-    { root: 0,  chords: [[0, 3, 7, 10, 14], [-4, 0, 3, 7, 10]] },     // Neon: Am9 / Fmaj9
-    { root: 5,  chords: [[0, 3, 7, 10, 12], [1, 5, 8, 12, 15]] },     // Lav: Dm7 / Ebmaj9
-    { root: -2, chords: [[0, 5, 7, 10, 14], [5, 9, 12, 16, 19]] },    // Asit: G7sus / Cmaj9
-    { root: 3,  chords: [[0, 4, 7, 11, 14], [5, 9, 12, 16, 19]] },    // Buz: Cmaj9 / Fmaj9
-    { root: 7,  chords: [[0, 3, 7, 10, 14], [-4, 0, 3, 7, 10]] },     // Negatif: Em9 / Cmaj9
+  const MINOR = [0, 3, 5, 7, 10], MAJOR = [0, 2, 4, 7, 9];
+  const MUSIC = [                                     // bölge sırasıyla: kök (La'dan yarım ses), üçlü, dizi
+    { root: 0,  third: 3, scale: MINOR },             // Neon: La minör
+    { root: 5,  third: 3, scale: MINOR },             // Lav: Re minör
+    { root: -2, third: 3, scale: MINOR },             // Asit: Sol minör
+    { root: 3,  third: 4, scale: MAJOR },             // Buz: Do majör
+    { root: 7,  third: 3, scale: MINOR },             // Negatif: Mi minör
   ];
-  const ARP = [0, 2, 3, 4, 2, 3, 5, 4];
-  const PATTERN = [0, 2, 4, 2, 5, 4, 7, 5];
-  let out = null, bus = null, verb = null, echo = null, duckG = null, hatBus = null, clapBus = null;
-  let noiseBuf = null, pad = null;
-  let musicOn = false, mStep = 0, nextT = 0, curChord = MUSIC[0].chords[0];
+  const LINE = [0, 1, 2, 1, 2, 3, 4, 3, 2, 3, 4, 3, 4, 5, 7, 5];   // melodinin dizi basamakları
+  let out = null, bus = null, verb = null, duckG = null, noiseBuf = null, pad = null;
   const mus = () => MUSIC[zoneIdx % MUSIC.length];
   const hz = (base, semi) => base * Math.pow(2, (mus().root + semi) / 12);
-  const tone5 = (chord, k) => chord[k % 5] + 12 * Math.floor(k / 5);
+  const note = d => { const sc = mus().scale; return hz(440, sc[d % 5] + 12 * Math.floor(d / 5)); };
   const layers = () => (score < 3 ? 0 : score < 8 ? 1 : score < 16 ? 2 : 3);
-  const s16 = () => 60 / Math.min(132, 108 + zoneIdx * 3) / 4;
   const panner = v => {
     if (!ac.createStereoPanner) return ac.createGain();
     const p = ac.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, v)); return p;
@@ -267,44 +265,27 @@
     const wet = ac.createGain(); wet.gain.value = 0.5;
     verb = ac.createGain(); verb.connect(pre); pre.connect(conv); conv.connect(wet); wet.connect(bus);
 
-    // sağ sol arasında giden gecikme
-    const dL = ac.createDelay(1), dR = ac.createDelay(1), f1 = ac.createGain(), f2 = ac.createGain();
-    const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2400;
-    dL.delayTime.value = 0.402; dR.delayTime.value = 0.402; f1.gain.value = 0.38; f2.gain.value = 0.38;
-    const pL = panner(-0.6), pR = panner(0.6);
-    echo = ac.createGain();
-    echo.connect(dL); dL.connect(pL); pL.connect(bus);
-    dL.connect(f1); f1.connect(dlp); dlp.connect(dR); dR.connect(pR); pR.connect(bus);
-    dR.connect(f2); f2.connect(dL);
-
     noiseBuf = ac.createBuffer(1, sr, sr);
     const nd = noiseBuf.getChannelData(0);
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
 
-    // davul vurunca geri çekilen kanal: pad, bas ve arpej buradan geçer
+    // pad: kök (alt oktav), kök, beşli, oktav, üçlü. Vuruşta hafifçe geri çekilir.
     duckG = ac.createGain(); duckG.connect(bus);
-    hatBus = ac.createBiquadFilter(); hatBus.type = 'highpass'; hatBus.frequency.value = 7000; hatBus.connect(bus);
-    clapBus = ac.createBiquadFilter(); clapBus.type = 'bandpass'; clapBus.frequency.value = 1700; clapBus.Q.value = 0.9;
-    clapBus.connect(bus);
-    const cs = ac.createGain(); cs.gain.value = 0.35; clapBus.connect(cs); cs.connect(verb);
-
-    // pad: beş ses, her biri hafif akortsuz iki testere dişi
-    const pf = ac.createBiquadFilter(); pf.type = 'lowpass'; pf.frequency.value = 800; pf.Q.value = 0.5;
+    const pf = ac.createBiquadFilter(); pf.type = 'lowpass'; pf.frequency.value = 700; pf.Q.value = 0.5;
     const pg = ac.createGain(); pg.gain.value = 0;
     const ps = ac.createGain(); ps.gain.value = 0.6;
     pf.connect(pg); pg.connect(duckG); pg.connect(ps); ps.connect(verb);
     const voices = [];
-    for (let i = 0; i < 5; i++) for (const det of [-6, 6]) {
+    for (let i = 0; i < 5; i++) for (const det of [-5, 5]) {
       const o = ac.createOscillator(), g = ac.createGain();
-      o.type = 'sawtooth'; o.detune.value = det; o.frequency.value = 220; g.gain.value = 0.03;
+      o.type = 'sawtooth'; o.detune.value = det; o.frequency.value = 220; g.gain.value = i === 4 ? 0.02 : 0.03;
       o.connect(g); g.connect(pf); o.start();
       voices.push({ o, i, det });
     }
     const lfo = ac.createOscillator(), lg = ac.createGain();
-    lfo.frequency.value = 0.07; lg.gain.value = 150; lfo.connect(lg); lg.connect(pf.frequency); lfo.start();
+    lfo.frequency.value = 0.07; lg.gain.value = 120; lfo.connect(lg); lg.connect(pf.frequency); lfo.start();
     pad = { g: pg, f: pf, voices };
 
-    setInterval(tickMusic, 25);
     if (local) window.__audio = { ac, out };   // yalnızca yerel denemede: ses düzeyini ölçmek için
   }
   function wake() {
@@ -313,13 +294,11 @@
       if (ac.state === 'suspended' && state !== 'paused') ac.resume();
     } catch (e) { ac = null; }
   }
-  // bir sesi çıkışa, yankıya (v) ve gecikmeye (e) dağıtır
-  function send(node, pan, v, e, dest) {
+  function send(node, pan, v) {                      // bir sesi çıkışa ve yankıya dağıtır
     let n = node;
     if (pan) { n = panner(pan); node.connect(n); }
-    n.connect(dest || bus);
+    n.connect(bus);
     if (v) { const s = ac.createGain(); s.gain.value = v; n.connect(s); s.connect(verb); }
-    if (e) { const s = ac.createGain(); s.gain.value = e; n.connect(s); s.connect(echo); }
   }
   function env(g, t, peak, attack, decay) {
     g.gain.setValueAtTime(0.0001, t);
@@ -328,90 +307,61 @@
   }
 
   // ---- çalgılar ----
-  function bell(freq, vol, when, pan) {              // FM çan: parlak vuruş, yumuşayan kuyruk
+  function bell(freq, vol, when, pan) {              // FM çan: tam oranlı, yani kendi içinde de uyumlu
     const t = ac.currentTime + (when || 0), g = ac.createGain();
     while (freq > 1800) freq /= 2;
     env(g, t, vol, 0.003, 1.3);
-    const mod = ac.createOscillator(), mg = ac.createGain();
-    mod.frequency.value = freq * 3.5;
-    mg.gain.setValueAtTime(freq * 2.4, t);
-    mg.gain.exponentialRampToValueAtTime(freq * 0.05, t + 0.35);
-    mod.connect(mg);
-    for (const [m, a] of [[1, 1], [2, 0.22]]) {
-      const o = ac.createOscillator(), og = ac.createGain();
-      o.frequency.value = freq * m; og.gain.value = a;
-      mg.connect(o.frequency); o.connect(og); og.connect(g);
-      o.start(t); o.stop(t + 1.4);
-    }
-    mod.start(t); mod.stop(t + 1.4);
-    send(g, pan || 0, 0.45, 0.4);
-  }
-  function gong(t) {                                 // ölümde çalan uyumsuz, derin FM vuruşu
-    const g = ac.createGain(), o = ac.createOscillator(), mod = ac.createOscillator(), mg = ac.createGain();
-    env(g, t, 0.3, 0.004, 2.4);
-    o.frequency.value = 98; mod.frequency.value = 98 * 1.414;
-    mg.gain.setValueAtTime(420, t); mg.gain.exponentialRampToValueAtTime(8, t + 1.6);
+    const mod = ac.createOscillator(), mg = ac.createGain(), o = ac.createOscillator();
+    mod.frequency.value = freq * 2;
+    mg.gain.setValueAtTime(freq * 1.5, t);
+    mg.gain.exponentialRampToValueAtTime(freq * 0.02, t + 0.3);
+    o.frequency.value = freq;
     mod.connect(mg); mg.connect(o.frequency); o.connect(g);
-    o.start(t); mod.start(t); o.stop(t + 2.5); mod.stop(t + 2.5);
-    send(g, 0, 0.6, 0);
+    o.start(t); mod.start(t); o.stop(t + 1.4); mod.stop(t + 1.4);
+    send(g, pan || 0, 0.5);
   }
-  function slide(f0, f1, dur, vol, t) {              // alt vuruş ve düşüş
-    t = t || ac.currentTime;
-    const o = ac.createOscillator(), g = ac.createGain();
+  function slide(f0, f1, dur, vol) {                 // alt vuruş ve düşüş
+    const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
     o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 2.6);
     o.connect(g); g.connect(bus); o.start(t); o.stop(t + dur * 2.7);
   }
-  function noise(t, dur, vol, dest, attack) {
-    const src = ac.createBufferSource(), g = ac.createGain();
-    src.buffer = noiseBuf; src.loop = true;
-    env(g, t, vol, attack || 0.002, dur);
-    src.connect(g); g.connect(dest);
-    src.start(t, Math.random() * 0.5); src.stop(t + (attack || 0) + dur + 0.05);
-    return g;
-  }
   function sweep(dur, f0, f1, vol, type, attack) {   // süzülmüş gürültü: hışırtı, patlama, zil
-    const t = ac.currentTime, f = ac.createBiquadFilter();
+    const t = ac.currentTime, f = ac.createBiquadFilter(), src = ac.createBufferSource(), g = ac.createGain();
     f.type = type; f.Q.value = 1.1;
     f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    noise(t, dur, vol, f, attack);
-    send(f, 0, 0.5, 0);
+    src.buffer = noiseBuf; src.loop = true;
+    env(g, t, vol, attack || 0.002, dur);
+    src.connect(g); g.connect(f);
+    src.start(t, Math.random() * 0.5); src.stop(t + (attack || 0) + dur + 0.05);
+    send(f, 0, 0.5);
   }
-  function tok(pan) {                                // yön değiştirme: kısa, tok bir vuruş
-    const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
-    o.type = 'triangle';
-    o.frequency.setValueAtTime(760, t); o.frequency.exponentialRampToValueAtTime(330, t + 0.035);
-    env(g, t, 0.13, 0.001, 0.05);
-    o.connect(g); o.start(t); o.stop(t + 0.08);
-    send(g, pan, 0.2, 0);
+  function tok(pan) {                                // yön değiştirme: perdesiz, kısa bir tık
+    const t = ac.currentTime, f = ac.createBiquadFilter(), src = ac.createBufferSource(), g = ac.createGain();
+    f.type = 'bandpass'; f.frequency.value = 3200; f.Q.value = 1.5;
+    src.buffer = noiseBuf;
+    env(g, t, 0.16, 0.001, 0.03);
+    src.connect(g); g.connect(f); src.start(t, Math.random() * 0.5); src.stop(t + 0.06);
+    send(f, pan, 0.1);
   }
-  function drumKick(t) {
-    slide(165, 46, 0.1, 0.9, t);
+  function drumKick() {
+    const t = ac.currentTime;
+    slide(150, 46, 0.1, 0.7);
     duckG.gain.cancelScheduledValues(t);
-    duckG.gain.setValueAtTime(0.35, t);
-    duckG.gain.linearRampToValueAtTime(1, t + 0.26);
+    duckG.gain.setValueAtTime(0.45, t);
+    duckG.gain.linearRampToValueAtTime(1, t + 0.3);
   }
-  function bass(t, f) {
+  function bass(semi) {                              // kökten ya da beşliden bir bas notası
+    const t = ac.currentTime; let f = hz(55, semi);
     while (f < 62) f *= 2;
     const o = ac.createOscillator(), sub = ac.createOscillator(), sg = ac.createGain();
     const lp = ac.createBiquadFilter(), g = ac.createGain();
-    o.type = 'sawtooth'; o.frequency.value = f; sub.frequency.value = f; sg.gain.value = 0.5;
-    lp.type = 'lowpass'; lp.Q.value = 5;
-    lp.frequency.setValueAtTime(1100, t); lp.frequency.exponentialRampToValueAtTime(180, t + 0.16);
-    env(g, t, 0.26, 0.004, 0.22);
-    o.connect(lp); lp.connect(g); sub.connect(sg); sg.connect(g); g.connect(duckG);
-    o.start(t); sub.start(t); o.stop(t + 0.3); sub.stop(t + 0.3);
-  }
-  function arp(t, f, vol) {
-    while (f > 1400) f /= 2;
-    const o = ac.createOscillator(), lp = ac.createBiquadFilter(), g = ac.createGain();
-    const top = 1600 + Math.min(score, 50) * 50;
-    o.type = 'sawtooth'; o.frequency.value = f;
-    lp.type = 'lowpass'; lp.Q.value = 2;
-    lp.frequency.setValueAtTime(top, t); lp.frequency.exponentialRampToValueAtTime(500, t + 0.11);
-    env(g, t, vol, 0.002, 0.17);
-    o.connect(lp); lp.connect(g); o.start(t); o.stop(t + 0.22);
-    send(g, 0, 0.2, 0.5, duckG);
+    o.type = 'sawtooth'; o.frequency.value = f; sub.frequency.value = f; sg.gain.value = 0.6;
+    lp.type = 'lowpass'; lp.Q.value = 3;
+    lp.frequency.setValueAtTime(900, t); lp.frequency.exponentialRampToValueAtTime(160, t + 0.25);
+    env(g, t, 0.26, 0.005, 0.45);
+    o.connect(lp); lp.connect(g); sub.connect(sg); sg.connect(g); g.connect(bus);
+    o.start(t); sub.start(t); o.stop(t + 0.55); sub.stop(t + 0.55);
   }
 
   // ---- pad ----
@@ -420,64 +370,48 @@
     const t = ac.currentTime;
     for (const v of pad.voices) { v.o.detune.cancelScheduledValues(t); v.o.detune.setTargetAtTime(v.det + cents, t, tc); }
   }
-  function padChord(t) { for (const v of pad.voices) v.o.frequency.setTargetAtTime(hz(220, curChord[v.i]), t, 0.04); }
-  const padBright = () => pad.f.frequency.setTargetAtTime(800 + Math.min(score, 60) * 28, ac.currentTime, 0.4);
-
-  // ---- müzik motoru: 16'lık adımlarla, biraz ileriyi planlayarak çalar ----
-  function playStep(i, t) {
-    const s = i % 16, L = layers();
-    const chord = mus().chords[Math.floor(i / 32) % 2];
-    if (chord !== curChord || i === 0) { curChord = chord; padChord(t); }
-    if (L >= 1 && s % 4 === 0) drumKick(t);
-    if (L >= 2 && s % 4 === 2) noise(t, 0.05, 0.11, hatBus);
-    if (L >= 3 && s % 2 === 1) noise(t, 0.03, 0.045, hatBus);
-    if (L >= 3 && (s === 4 || s === 12)) noise(t, 0.16, 0.3, clapBus);
-    if (L >= 2 && (s % 4 === 2 || s === 15)) bass(t, hz(55, chord[0]) * (s === 15 ? 2 : 1));
-    if (L >= 1 || s % 2 === 0) arp(t, hz(440, tone5(chord, ARP[i % 8])), s % 4 === 0 ? 0.07 : 0.045);
+  function padChord(tc) {
+    const semis = [-12, 0, 7, 12, 12 + mus().third];
+    for (const v of pad.voices) v.o.frequency.setTargetAtTime(hz(220, semis[v.i]), ac.currentTime, tc);
   }
-  function tickMusic() {
-    if (!ac || !musicOn || ac.state !== 'running') return;
-    const now = ac.currentTime;
-    if (nextT < now) nextT = now + 0.02;             // sekme uyuduysa birikmiş adımları atla
-    while (nextT < now + 0.12) { playStep(mStep++, nextT); nextT += s16(); }
-  }
-  function musicStart(fresh) {
-    if (fresh) mStep = 0;
-    musicOn = true; nextT = ac.currentTime + 0.06;
-    padTune(0, 0.05); padBright(); padSet(0.9, fresh ? 0.4 : 0.2);
-  }
+  const padBright = () => pad.f.frequency.setTargetAtTime(700 + Math.min(score, 60) * 26, ac.currentTime, 0.4);
+  function padOn(tc) { padTune(0, 0.05); padBright(); padSet(0.9, tc); }
+  const triad = () => [0, mus().third, 7, 12];
 
   // ---- oyun olayları ----
   function sfxStart() {
     if (!ac) return;
-    musicStart(true);
-    bell(hz(440, curChord[0]), 0.2); bell(hz(440, curChord[2]), 0.16, 0.1);
+    padChord(0.02); padOn(0.4);
+    bell(hz(440, 0), 0.2); bell(hz(440, 7), 0.15, 0.12);
   }
   function sfxPass() {
     if (!ac) return;
-    bell(hz(440, tone5(curChord, PATTERN[score % 8])), 0.22, 0, Math.cos(player.a) * 0.5);
-    if (layers() === 0) slide(120, 50, 0.1, 0.3);
+    const L = layers(), d = LINE[score % 16], pan = Math.cos(player.a) * 0.5;
+    bell(note(d), 0.22, 0, pan);
+    if (L >= 2) bell(note(d + 2), 0.08, 0, -pan);    // dizide iki basamak üstü: hep uyumlu bir aralık
+    if (L >= 3) bell(note(d) * 2, 0.04);
+    if (L >= 1) bass(score % 4 === 3 ? 7 : 0);
+    if (L >= 2) drumKick(); else slide(120, 50, 0.1, 0.3);
     padBright();
   }
   function sfxZone() {
     if (!ac) return;
-    const chord = mus().chords[0];
-    [0, 2, 4, 5].forEach((k, i) => bell(hz(440, tone5(chord, k)), 0.15, 0.04 + i * 0.07, (i - 1.5) * 0.3));
-    sweep(1.3, 9000, 3500, 0.13, 'highpass');       // zil
-    slide(130, 36, 0.45, 0.7);
+    padChord(0.08);                                  // pad yeni tona kayar
+    triad().forEach((s, i) => bell(hz(440, s), 0.16, i * 0.08, (i - 1.5) * 0.3));
+    bass(0); drumKick();
+    sweep(1.3, 9000, 3500, 0.12, 'highpass');       // zil
   }
   function sfxFlip() { if (ac) tok(player.dir * 0.35); }
   function sfxDie() {
     if (!ac) return;
-    musicOn = false;
     padTune(-2400, 0.3); padSet(0, 0.45);            // pad bant gibi yavaşlayıp susar
-    sweep(1.1, 4000, 60, 0.4, 'lowpass'); slide(180, 26, 0.9, 0.6); gong(ac.currentTime);
+    sweep(1.1, 4000, 60, 0.35, 'lowpass'); slide(hz(110, 0), hz(27.5, 0), 0.9, 0.6);
   }
   function sfxRevive() {
     if (!ac) return;
-    musicStart(false);
-    sweep(0.5, 400, 5000, 0.12, 'bandpass', 0.35);
-    [0, 2, 4].forEach((k, i) => bell(hz(440, tone5(curChord, k)), 0.16, i * 0.08));
+    padOn(0.2);
+    sweep(0.5, 400, 5000, 0.1, 'bandpass', 0.35);
+    triad().slice(0, 3).forEach((s, i) => bell(hz(440, s), 0.16, i * 0.08));
   }
 
   // ---- durum ----
